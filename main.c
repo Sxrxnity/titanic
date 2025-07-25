@@ -32,6 +32,8 @@
 ///                         subset 5, when this is zero, you should include
 ///                         everything in the current directory.
 
+// TODO: implement this.
+
     // Hint: you will need to:
     //   * Open `out_pathname` using fopen, which will be the output TABI file.
     //   * For each pathname in `in_pathnames`:
@@ -90,8 +92,8 @@ void stage_1(char *out_pathname, char *in_pathnames[], size_t num_in_pathnames) 
             }
 
             uint64_t hash = hash_block((char *)buffer, bytes_read);
-            for (int k = 0; k < 8; k++) {
-                fputc(hash >> (k * 8) & 0xFF, file);
+            for (int k = 0; k < HASH_SIZE ; k++) {
+                fputc(hash >> (k * MATCH_BYTE_BITS) & 0xFF, file);
             }
         }
 
@@ -107,6 +109,145 @@ void stage_1(char *out_pathname, char *in_pathnames[], size_t num_in_pathnames) 
 /// @param in_pathname A path to where the existing TABI file is located.
 void stage_2(char *out_pathname, char *in_pathname) {
 
+    FILE *read_file = fopen(in_pathname, "rb");
+    FILE *write_file = fopen(out_pathname, "wb");
+
+    if (read_file == NULL || write_file == NULL) {
+        perror("SOME DIFFERENT ERROR MESSAGE");
+        exit(1);
+    }
+
+    uint8_t magic[4];
+    if (fread(magic, 1, 4, read_file) != 4 ||
+        magic[0] != 0x54 || magic[1] != 0x41 ||
+        magic[2] != 0x42 || magic[3] != 0x49) {
+        perror("Bad magic");
+        exit(1);
+    }
+
+    fputc(0x54, write_file);
+    fputc(0x42, write_file);
+    fputc(0x42, write_file);
+    fputc(0x49, write_file);
+
+    // Read the number of records
+    int c = fgetc(read_file);
+    if (c == EOF) {
+        perror("Failed to read number of records");
+        exit(1);
+    }
+    uint8_t num_records = (uint8_t)c;
+    if (num_records == 0) {
+        perror("Invalid records");
+        exit(1);
+    }
+    fputc(num_records, write_file);
+
+    size_t records_processed = 0;
+    for (size_t j = 0; j < num_records; j++) {
+        struct stat info;
+
+        uint16_t pathname_length;
+        char *pathname;
+        uint32_t num_blocks;
+
+        // STEP 1: Read 2-byte pathname length (little-endian)
+        uint8_t len_bytes[2];
+        if (fread(len_bytes, 1, 2, read_file) != 2) {
+            perror("Failed to read pathname length");
+            exit(1);
+        }
+        pathname_length = len_bytes[0] | (len_bytes[1] << 8);
+        fwrite(len_bytes, 1, 2, write_file);
+
+        // STEP 2: Read pathname
+        pathname = malloc(pathname_length + 1);
+        if (pathname == NULL) {
+            perror("malloc failed");
+            exit(1);
+        }
+        if (fread(pathname, 1, pathname_length, read_file) != pathname_length) {
+            perror("Failed to read pathname");
+            exit(1);
+        }
+        fwrite(pathname, 1, pathname_length, write_file);
+        pathname[pathname_length] = '\0';
+
+        // STEP 3: Read 3-byte number of blocks (little-endian)
+        uint8_t block_bytes[3];
+        if (fread(block_bytes, 1, 3, read_file) != 3) {
+            perror("Failed to read number of blocks");
+            exit(1);
+        }
+        num_blocks = block_bytes[0] | (block_bytes[1] << 8) | (block_bytes[2] << 16);
+        fwrite(block_bytes, 1, 3, write_file);
+
+        // Calculate how many bytes are needed to store 1 bit per block
+        size_t match_bytes = num_tbbi_match_bytes(num_blocks);
+        uint8_t *matches = calloc(match_bytes, 1); // All bits start at 0
+        if (matches == NULL) {
+            perror("calloc failed");
+            exit(1);
+        }
+
+        // Try to open receiver's version of the file
+        int has_file = stat(pathname, &info) == 0;
+        FILE *recv_file;
+        if (has_file) {
+            recv_file = fopen(pathname, "rb");
+        } else {
+            recv_file = NULL;
+        }
+
+        // Loop through all blocks
+        for (uint32_t k = 0; k < num_blocks; k++) {
+            // Read 8-byte hash from TABI
+            uint8_t hash_bytes[8];
+            if (fread(hash_bytes, 1, 8, read_file) != 8) {
+                perror("Failed to read TABI hash");
+                exit(1);
+            }
+
+            if (recv_file) {
+                unsigned char buf[BLOCK_SIZE];
+                size_t bytes_read = fread(buf, 1, BLOCK_SIZE, recv_file);
+
+                if (bytes_read == 0 && ferror(recv_file)) {
+                    perror("Failed to read receiver block");
+                    exit(1);
+                }
+
+                // Convert TABI hash bytes to uint64_t
+                uint64_t tabi_hash = 0;
+                for (int b = 0; b < 8; b++) {
+                    tabi_hash |= ((uint64_t)hash_bytes[b]) << (b * 8);
+                }
+
+                uint64_t local_hash = hash_block((char *)buf, bytes_read);
+
+                if (tabi_hash == local_hash) {
+                    matches[k / 8] |= (1 << (7 - (k % 8))); // Set correct match bit
+                }
+            }
+        }
+
+        // Write matches bitfield to output
+        fwrite(matches, 1, match_bytes, write_file);
+
+        records_processed++;
+        free(matches);
+        free(pathname);
+        if (recv_file) {
+            fclose(recv_file);
+        }
+    }
+
+    if (records_processed < num_records) {
+        perror("Insufficient number of records in TABI file");
+        exit(1);
+    }
+    fclose(read_file);
+    fclose(write_file);
 }
 
 
