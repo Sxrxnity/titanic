@@ -246,6 +246,14 @@ void stage_2(char *out_pathname, char *in_pathname) {
         perror("Insufficient number of records in TABI file");
         exit(1);
     }
+
+    // Check for extra data by attempting to read one more byte
+    int extra_byte = fgetc(read_file);
+    if (extra_byte != EOF) {
+        perror("Extra data in TABI file");
+        exit(1);
+    }
+
     fclose(read_file);
     fclose(write_file);
 }
