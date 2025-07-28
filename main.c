@@ -23,6 +23,8 @@
 
 #include "titanic.h"
 
+mode_t parse_mode(uint8_t *mode);
+
 
 /// @brief Create a TABI file from an array of pathnames.
 /// @param out_pathname A path to where the new TABI file should be created.
@@ -586,5 +588,182 @@ void stage_3(char *out_pathname, char *in_pathname) {
 /// @brief Apply a TCBI file to the filesystem.
 /// @param in_pathname A path to where the existing TCBI file is located.
 void stage_4(char *in_pathname) {
+    FILE *read_file = fopen(in_pathname, "rb");
+    if (read_file == NULL) {
+        perror("Failed to open TCBI file");
+        exit(1);
+    }
 
+    uint8_t magic[MAGIC_SIZE];
+    if (fread(magic, 1, MAGIC_SIZE, read_file) != MAGIC_SIZE ||
+        magic[0] != TYPE_C_MAGIC[0] || magic[1] != TYPE_C_MAGIC[1] ||
+        magic[2] != TYPE_C_MAGIC[2] || magic[3] != TYPE_C_MAGIC[3]) {
+        perror("Bad magic");
+        fclose(read_file);
+        exit(1);
+    }
+
+    int c = fgetc(read_file);
+    if (c == EOF) {
+        perror("Failed to read number of records");
+        fclose(read_file);
+        exit(1);
+    }
+    uint8_t num_records = (uint8_t)c;
+    if (num_records == 0) {
+        perror("Invalid records");
+        fclose(read_file);
+        exit(1);
+    }
+
+    for (uint8_t j = 0; j < num_records; j++) {
+        uint8_t len_bytes[PATHNAME_LEN_SIZE];
+        if (fread(len_bytes, 1, PATHNAME_LEN_SIZE, read_file) != PATHNAME_LEN_SIZE) {
+            perror("Failed to read pathname length");
+            fclose(read_file);
+            exit(1);
+        }
+        uint16_t pathname_length = len_bytes[0] | (len_bytes[1] << MATCH_BYTE_BITS);
+        char *pathname = malloc(pathname_length + 1);
+        if (pathname == NULL) {
+            perror("malloc failed");
+            fclose(read_file);
+            exit(1);
+        }
+        if (fread(pathname, 1, pathname_length, read_file) != pathname_length) {
+            perror("Failed to read pathname");
+            free(pathname);
+            fclose(read_file);
+            exit(1);
+        }
+        pathname[pathname_length] = '\0';
+
+        uint8_t mode[MODE_SIZE];
+        if (fread(mode, 1, MODE_SIZE, read_file) != MODE_SIZE) {
+            perror("Failed to read mode");
+            free(pathname);
+            fclose(read_file);
+            exit(1);
+        }
+
+        uint8_t size_bytes[FILE_SIZE_SIZE];
+        if (fread(size_bytes, 1, FILE_SIZE_SIZE, read_file) != FILE_SIZE_SIZE) {
+            perror("Failed to read file size");
+            free(pathname);
+            fclose(read_file);
+            exit(1);
+        }
+        uint32_t file_size = size_bytes[0] | (size_bytes[1] << MATCH_BYTE_BITS) |
+                           (size_bytes[2] << (MATCH_BYTE_BITS * 2)) |
+                           (size_bytes[3] << (MATCH_BYTE_BITS * 3));
+
+        uint8_t updates_bytes[NUM_BLOCKS_SIZE];
+        if (fread(updates_bytes, 1, NUM_BLOCKS_SIZE, read_file) != NUM_BLOCKS_SIZE) {
+            perror("Failed to read number of updates");
+            free(pathname);
+            fclose(read_file);
+            exit(1);
+        }
+        uint32_t num_updates = updates_bytes[0] |
+                             (updates_bytes[1] << MATCH_BYTE_BITS) |
+                             (updates_bytes[2] << (MATCH_BYTE_BITS * 2));
+
+        mode_t permissions = parse_mode(mode);
+        struct stat existing_stat;
+        int file_exists = (stat(pathname, &existing_stat) == 0);
+        int needs_update = (num_updates > 0) || !file_exists || existing_stat.st_size != file_size;
+
+        FILE *out_file = NULL;
+        if (needs_update) {
+            int fd = open(pathname, O_CREAT | O_WRONLY, 0666);
+            if (fd < 0) {
+                perror("Failed to create output file");
+                free(pathname);
+                fclose(read_file);
+                exit(1);
+            }
+            if (ftruncate(fd, file_size) < 0) {
+                perror("Failed to resize output file");
+                close(fd);
+                free(pathname);
+                fclose(read_file);
+                exit(1);
+            }
+            close(fd);
+            out_file = fopen(pathname, "r+b");
+            if (out_file == NULL) {
+                perror("Failed to open output file for writing");
+                free(pathname);
+                fclose(read_file);
+                exit(1);
+            }
+        }
+
+        if (chmod(pathname, permissions) < 0) {
+            perror("Failed to set file permissions");
+            if (out_file) fclose(out_file);
+            free(pathname);
+            fclose(read_file);
+            exit(1);
+        }
+
+        for (uint32_t k = 0; k < num_updates; k++) {
+            uint8_t idx_bytes[BLOCK_INDEX_SIZE];
+            if (fread(idx_bytes, 1, BLOCK_INDEX_SIZE, read_file) != BLOCK_INDEX_SIZE) {
+                perror("Failed to read block index");
+                if (out_file) fclose(out_file);
+                free(pathname);
+                fclose(read_file);
+                exit(1);
+            }
+            uint32_t block_idx = idx_bytes[0] | (idx_bytes[1] << MATCH_BYTE_BITS) |
+                               (idx_bytes[2] << (MATCH_BYTE_BITS * 2));
+
+            uint8_t update_len_bytes[UPDATE_LEN_SIZE];
+            if (fread(update_len_bytes, 1, UPDATE_LEN_SIZE, read_file)
+                != UPDATE_LEN_SIZE) {
+                perror("Failed to read update length");
+                if (out_file) fclose(out_file);
+                free(pathname);
+                fclose(read_file);
+                exit(1);
+            }
+            uint16_t update_length = update_len_bytes[0]
+                                  | (update_len_bytes[1] << MATCH_BYTE_BITS);
+
+            uint8_t *update_data = malloc(update_length);
+
+            fread(update_data, 1, update_length, read_file);
+            fseek(out_file, block_idx * BLOCK_SIZE, SEEK_SET);
+            fwrite(update_data, 1, update_length, out_file);
+            free(update_data);
+        }
+
+        if (out_file) fclose(out_file);
+        free(pathname);
+    }
+
+    int extra_byte = fgetc(read_file);
+    if (extra_byte != EOF) {
+        perror("Extra data in TCBI file");
+        fclose(read_file);
+        exit(1);
+    }
+
+    fclose(read_file);
+}
+
+mode_t parse_mode(uint8_t *mode) {
+    mode_t m = 0;
+    if (mode[0] == 'd') m |= S_IFDIR;
+    if (mode[1] == 'r') m |= S_IRUSR;
+    if (mode[2] == 'w') m |= S_IWUSR;
+    if (mode[3] == 'x') m |= S_IXUSR;
+    if (mode[4] == 'r') m |= S_IRGRP;
+    if (mode[5] == 'w') m |= S_IWGRP;
+    if (mode[6] == 'x') m |= S_IXGRP;
+    if (mode[7] == 'r') m |= S_IROTH;
+    if (mode[8] == 'w') m |= S_IWOTH;
+    if (mode[9] == 'x') m |= S_IXOTH;
+    return m & 0777;
 }
