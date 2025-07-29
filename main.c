@@ -3,7 +3,9 @@
 // <https://cgi.cse.unsw.edu.au/~cs1521/25T2/assignments/ass2/index.html>
 //
 // Written by Danny Sun (z5691331) on 21/07/2025.
-// INSERT-DESCRIPTION-OF-PROGRAM-HERE
+//
+// A file synchronisation tool that creates and applies index files to
+// efficiently update files between a sender and receiver.
 //
 // 2025-07-20   v1.0    Team COMP1521 <cs1521 at cse.unsw.edu.au>
 
@@ -23,6 +25,10 @@
 
 #include "titanic.h"
 
+// Additional elements
+#define READ_WRITE_PERMISSIONS 0666
+#define ALL_PERMISSIONS 0777
+
 mode_t parse_mode(uint8_t *mode);
 
 
@@ -34,65 +40,58 @@ mode_t parse_mode(uint8_t *mode);
 ///                         subset 5, when this is zero, you should include
 ///                         everything in the current directory.
 
-// TODO: implement this.
-
-    // Hint: you will need to:
-    //   * Open `out_pathname` using fopen, which will be the output TABI file.
-    //   * For each pathname in `in_pathnames`:
-    //      * Write the length of the pathname as a 2 byte little endian integer
-    //      * Write the pathname
-    //      * Check the size of the input file, e.g. using stat
-    //      * Compute the number of blocks using number_of_blocks_in_file
-    //      * Write the number of blocks as a 3 byte little endian integer
-    //      * Open the input file, and read in blocks of size BLOCK_SIZE, and
-    //         * For each block call hash_black to compute the hash
-    //         * Write out that hash as an 8 byte little endian integer
-    // Each time you need to write out a little endian integer you should
-    // compute each byte using bitwise operations like <<, &, or |
-
 void stage_1(char *out_pathname, char *in_pathnames[], size_t num_in_pathnames) {
 
     FILE *file = fopen(out_pathname, "wb");
 
+    // Write the magic number for TABI file
     fputc(TYPE_A_MAGIC[0], file);
     fputc(TYPE_A_MAGIC[1], file);
     fputc(TYPE_A_MAGIC[2], file);
     fputc(TYPE_A_MAGIC[3], file);
+
     fputc(num_in_pathnames, file);
 
+    // Process each pathname
     for (size_t i = 0; i < num_in_pathnames; i++) {
         struct stat info;
         if (stat(in_pathnames[i], &info) != 0) {
-            perror("SOME ERROR MESSAGE");
+            perror("Failed to retrieve information");
             exit(1);
         }
 
+        // Read and write pathname length
         size_t len = strlen(in_pathnames[i]);
         fputc(len & 0xFF, file);
         fputc((len >> MATCH_BYTE_BITS) & 0xFF, file);
         fwrite(in_pathnames[i], 1, len, file);
 
+        // Read and write number of blocks in the file
         size_t num_blocks = number_of_blocks_in_file(info.st_size);
         fputc(num_blocks & 0xFF, file);
         fputc((num_blocks) >> MATCH_BYTE_BITS & 0xFF, file);
         fputc((num_blocks) >> (MATCH_BYTE_BITS * 2) & 0xFF, file);
 
+        // Open the input file for reading
         FILE *input_file = fopen(in_pathnames[i], "rb");
         if (input_file == NULL) {
-            perror("AN ERROR MESSAGE");
+            perror("Failed to open file");
             exit(1);
         }
 
         unsigned char buffer[BLOCK_SIZE];
 
+        // Process each block in the file
         for (size_t j = 0; j < num_blocks; j++) {
             size_t bytes_read = fread(buffer, 1, BLOCK_SIZE, input_file);
 
+            // Check for read error
             if (bytes_read == 0 && ferror(input_file)) {
-                perror("SOMME OTHER ERROR MESSAGE");
+                perror("Failed to read bytes");
                 exit(1);
             }
 
+            // Write hash as 8-byte little-endian integer
             uint64_t hash = hash_block((char *)buffer, bytes_read);
             for (int k = 0; k < HASH_SIZE ; k++) {
                 fputc(hash >> (k * MATCH_BYTE_BITS) & 0xFF, file);
@@ -109,16 +108,19 @@ void stage_1(char *out_pathname, char *in_pathnames[], size_t num_in_pathnames) 
 /// @brief Create a TBBI file from a TABI file.
 /// @param out_pathname A path to where the new TBBI file should be created.
 /// @param in_pathname A path to where the existing TABI file is located.
+
 void stage_2(char *out_pathname, char *in_pathname) {
 
     FILE *read_file = fopen(in_pathname, "rb");
     FILE *write_file = fopen(out_pathname, "wb");
 
+    // Check if either file failed to open
     if (read_file == NULL || write_file == NULL) {
-        perror("SOME DIFFERENT ERROR MESSAGE");
+        perror("Failed to open file(s)");
         exit(1);
     }
 
+    // Validate the magic number from the TABI file
     uint8_t magic[MAGIC_SIZE];
     if (fread(magic, 1, MAGIC_SIZE, read_file) != MAGIC_SIZE ||
         magic[0] != TYPE_A_MAGIC[0] || magic[1] != TYPE_A_MAGIC[1] ||
@@ -146,14 +148,15 @@ void stage_2(char *out_pathname, char *in_pathname) {
     fputc(num_records, write_file);
 
     size_t records_processed = 0;
+
+    // Process each record in the TABI file
     for (size_t j = 0; j < num_records; j++) {
         struct stat info;
-
         uint16_t pathname_length;
         char *pathname;
         uint32_t num_blocks;
 
-        // STEP 1: Read 2-byte pathname length (little-endian)
+        // Read 2-byte pathname length (little-endian)
         uint8_t len_bytes[PATHNAME_LEN_SIZE];
         if (fread(len_bytes, 1, PATHNAME_LEN_SIZE, read_file)
             != PATHNAME_LEN_SIZE) {
@@ -163,7 +166,7 @@ void stage_2(char *out_pathname, char *in_pathname) {
         pathname_length = len_bytes[0] | (len_bytes[1] << MATCH_BYTE_BITS);
         fwrite(len_bytes, 1, PATHNAME_LEN_SIZE, write_file);
 
-        // STEP 2: Read pathname
+        // Read pathname
         pathname = malloc(pathname_length + 1);
         if (pathname == NULL) {
             perror("malloc failed");
@@ -177,7 +180,7 @@ void stage_2(char *out_pathname, char *in_pathname) {
         fwrite(pathname, 1, pathname_length, write_file);
         pathname[pathname_length] = '\0';
 
-        // STEP 3: Read 3-byte number of blocks (little-endian)
+        // Read 3-byte number of blocks (little-endian)
         uint8_t block_bytes[NUM_BLOCKS_SIZE];
         if (fread(block_bytes, 1, NUM_BLOCKS_SIZE, read_file)
             != NUM_BLOCKS_SIZE) {
@@ -255,6 +258,7 @@ void stage_2(char *out_pathname, char *in_pathname) {
         }
     }
 
+    // Verify all expected records were processed
     if (records_processed < num_records) {
         perror("Insufficient number of records in TABI file");
         exit(1);
@@ -275,16 +279,19 @@ void stage_2(char *out_pathname, char *in_pathname) {
 /// @brief Create a TCBI file from a TBBI file.
 /// @param out_pathname A path to where the new TCBI file should be created.
 /// @param in_pathname A path to where the existing TBBI file is located.
+
 void stage_3(char *out_pathname, char *in_pathname) {
 
+    // Open the TBBI input file and TCBI output file
     FILE *read_file = fopen(in_pathname, "rb");
     FILE *write_file = fopen(out_pathname, "wb");
 
     if (read_file == NULL || write_file == NULL) {
-        perror("SOME DIFFERENT ERROR MESSAGE");
+        perror("Failed to open file(s)");
         exit(1);
     }
 
+    // Validate the magic number from the TBBI file
     uint8_t magic[MAGIC_SIZE];
     if (fread(magic, 1, MAGIC_SIZE, read_file) != MAGIC_SIZE ||
         magic[0] != TYPE_B_MAGIC[0] || magic[1] != TYPE_B_MAGIC[1] ||
@@ -293,6 +300,7 @@ void stage_3(char *out_pathname, char *in_pathname) {
         exit(1);
     }
 
+    // Write the magic number for the TCBI file
     fputc(TYPE_C_MAGIC[0], write_file);
     fputc(TYPE_C_MAGIC[1], write_file);
     fputc(TYPE_C_MAGIC[2], write_file);
@@ -310,6 +318,7 @@ void stage_3(char *out_pathname, char *in_pathname) {
     }
     fputc(num_records, write_file);
 
+    // Process each record in the TBBI file
     for (uint8_t j = 0; j < num_records; j++) {
         struct stat info;
 
@@ -317,7 +326,7 @@ void stage_3(char *out_pathname, char *in_pathname) {
         char *pathname;
         uint32_t file_size;
 
-        // STEP 1: Read 2-byte pathname length (little-endian)
+        // Read 2-byte pathname length (little-endian)
         uint8_t len_bytes[PATHNAME_LEN_SIZE];
         if (fread(len_bytes, 1, PATHNAME_LEN_SIZE, read_file)
             != PATHNAME_LEN_SIZE) {
@@ -327,7 +336,7 @@ void stage_3(char *out_pathname, char *in_pathname) {
         pathname_length = len_bytes[0] | (len_bytes[1] << MATCH_BYTE_BITS);
         fwrite(len_bytes, 1, PATHNAME_LEN_SIZE, write_file);
 
-        // STEP 2: Read pathname
+        // Read pathname
         pathname = malloc(pathname_length + 1);
         if (pathname == NULL) {
             perror("malloc failed");
@@ -341,7 +350,7 @@ void stage_3(char *out_pathname, char *in_pathname) {
         fwrite(pathname, 1, pathname_length, write_file);
         pathname[pathname_length] = '\0';
 
-        // STEP 3: Write mode
+        // Write mode
         if (stat(pathname, &info) == -1) {
             perror("Failed to retrieve mode");
             exit(1);
@@ -404,11 +413,11 @@ void stage_3(char *out_pathname, char *in_pathname) {
             fwrite(mode, 1, MODE_SIZE, write_file);
         }
 
-        // STEP 4: Write file size
+        // Write file size
         file_size = (uint32_t)info.st_size;
         fwrite(&file_size, 1, FILE_SIZE_SIZE, write_file);
 
-        // STEP 5: Number of updates
+        // Number of updates
         uint8_t num_blocks_bytes[NUM_BLOCKS_SIZE];
         if (fread(num_blocks_bytes, 1, NUM_BLOCKS_SIZE, read_file)
             != NUM_BLOCKS_SIZE) {
@@ -443,7 +452,7 @@ void stage_3(char *out_pathname, char *in_pathname) {
                 uint8_t last_byte = matches[matches_size - 1];
                 int padding_bits = MATCH_BYTE_BITS -
                     (num_blocks % MATCH_BYTE_BITS);
-                uint8_t mask = (1 << padding_bits) - 1;  // Mask for LSB padding bits
+                uint8_t mask = (1 << padding_bits) - 1;
                 if ((last_byte & mask) != 0) {
                     perror("Invalid padding in matches field");
                     free(matches);
@@ -457,6 +466,7 @@ void stage_3(char *out_pathname, char *in_pathname) {
         for (size_t i = 0; i < matches_size; i++) {
             uint8_t byte = matches[i];
             int bits_to_check;
+
             if (i == matches_size - 1) {
                 if (num_blocks % MATCH_BYTE_BITS) {
                     bits_to_check = num_blocks % MATCH_BYTE_BITS;
@@ -466,6 +476,7 @@ void stage_3(char *out_pathname, char *in_pathname) {
             } else {
                 bits_to_check = MATCH_BYTE_BITS;
             }
+
             for (int bit_pos = 0; bit_pos < bits_to_check; bit_pos++) {
                 int bit = MATCH_BYTE_BITS - 1 - bit_pos;
                 if (!(byte & (1 << bit))) {
@@ -481,7 +492,7 @@ void stage_3(char *out_pathname, char *in_pathname) {
         updates_bytes[2] = (num_updates >> (MATCH_BYTE_BITS * 2)) & 0xFF;
         fwrite(updates_bytes, 1, NUM_BLOCKS_SIZE, write_file);
 
-        // STEP 6: Write updates section (unchanged, but uses matches safely)
+        // Write updates section (unchanged, but uses matches safely)
         FILE *sender_file = fopen(pathname, "rb");
         if (sender_file == NULL) {
             perror("Failed to open sender file");
@@ -491,25 +502,15 @@ void stage_3(char *out_pathname, char *in_pathname) {
 
         // Read entire sender file into memory
         uint8_t *sender_data = malloc(file_size);
-        if (sender_data == NULL) {
-            perror("malloc failed for sender data");
-            fclose(sender_file);
-            if (matches) free(matches);
-            exit(1);
-        }
-        if (fread(sender_data, 1, file_size, sender_file) != file_size) {
-            perror("Failed to read sender file");
-            fclose(sender_file);
-            free(sender_data);
-            if (matches) free(matches);
-            exit(1);
-        }
+
+        fread(sender_data, 1, file_size, sender_file);
         fclose(sender_file);
 
-        // Determine block indices needing updates (MSB-first)
+        // Determine block indices needing updates
         for (size_t i = 0; i < matches_size; i++) {
             uint8_t byte = matches[i];
             int bits_to_check;
+
             if (i == matches_size - 1) {
                 if (num_blocks % MATCH_BYTE_BITS) {
                     bits_to_check = num_blocks % MATCH_BYTE_BITS;
@@ -519,10 +520,12 @@ void stage_3(char *out_pathname, char *in_pathname) {
             } else {
                 bits_to_check = MATCH_BYTE_BITS;
             }
+
             for (int bit_pos = 0; bit_pos < bits_to_check; bit_pos++) {
-                int bit = MATCH_BYTE_BITS - 1 - bit_pos;  // Start from MSB (bit 7)
+                int bit = MATCH_BYTE_BITS - 1 - bit_pos;
                 if (!(byte & (1 << bit))) {
                     uint32_t block_idx = (i * MATCH_BYTE_BITS) + bit_pos;
+
                     // Calculate start and length of the block
                     size_t start_byte = block_idx * BLOCK_SIZE;
                     size_t update_length;
@@ -532,7 +535,7 @@ void stage_3(char *out_pathname, char *in_pathname) {
                         update_length = BLOCK_SIZE;
                     }
                     if (update_length > BLOCK_SIZE) {
-                        update_length = BLOCK_SIZE; // Cap at BLOCK_SIZE
+                        update_length = BLOCK_SIZE;
                     }
 
                     // Write block index (3 bytes, little-endian)
@@ -540,6 +543,7 @@ void stage_3(char *out_pathname, char *in_pathname) {
                     idx_bytes[0] = block_idx & 0xFF;
                     idx_bytes[1] = (block_idx >> MATCH_BYTE_BITS) & 0xFF;
                     idx_bytes[2] = (block_idx >> (MATCH_BYTE_BITS * 2)) & 0xFF;
+
                     if (fwrite(idx_bytes, 1, BLOCK_INDEX_SIZE, write_file)
                         != BLOCK_INDEX_SIZE) {
                         perror("Failed to write block index");
@@ -553,27 +557,22 @@ void stage_3(char *out_pathname, char *in_pathname) {
                     update_len_bytes[0] = update_length & 0xFF;
                     update_len_bytes[1] =
                         (update_length >> MATCH_BYTE_BITS) & 0xFF;
-                    if (fwrite(update_len_bytes, 1, UPDATE_LEN_SIZE, write_file)
-                        != UPDATE_LEN_SIZE) {
-                        perror("Failed to write update length");
-                        free(sender_data);
-                        if (matches) free(matches);
-                        exit(1);
-                    }
+                    fwrite(update_len_bytes, 1, UPDATE_LEN_SIZE, write_file);
 
                     // Write update data
-                    fwrite(sender_data + start_byte,
-                        1, update_length, write_file);
+                    fwrite(sender_data + start_byte, 1, update_length, write_file);
                 }
             }
         }
 
         free(sender_data);
-        if (matches) free(matches);
+        if (matches) {
+            free(matches);
+        }
         free(pathname);
-
     }
 
+    // Process each record in the TBBI file
     int extra_byte = fgetc(read_file);
     if (extra_byte != EOF) {
         perror("Extra data in TBBI File");
@@ -587,13 +586,17 @@ void stage_3(char *out_pathname, char *in_pathname) {
 
 /// @brief Apply a TCBI file to the filesystem.
 /// @param in_pathname A path to where the existing TCBI file is located.
+
 void stage_4(char *in_pathname) {
+
+    // Open and validate the TCBI input file
     FILE *read_file = fopen(in_pathname, "rb");
     if (read_file == NULL) {
         perror("Failed to open TCBI file");
         exit(1);
     }
 
+    // Validate the magic number from the TCBI file
     uint8_t magic[MAGIC_SIZE];
     if (fread(magic, 1, MAGIC_SIZE, read_file) != MAGIC_SIZE ||
         magic[0] != TYPE_C_MAGIC[0] || magic[1] != TYPE_C_MAGIC[1] ||
@@ -603,6 +606,7 @@ void stage_4(char *in_pathname) {
         exit(1);
     }
 
+    // Read the number of records from the TCBI file
     int c = fgetc(read_file);
     if (c == EOF) {
         perror("Failed to read number of records");
@@ -616,20 +620,16 @@ void stage_4(char *in_pathname) {
         exit(1);
     }
 
+    // Process each record in the TCBI file
     for (uint8_t j = 0; j < num_records; j++) {
         uint8_t len_bytes[PATHNAME_LEN_SIZE];
-        if (fread(len_bytes, 1, PATHNAME_LEN_SIZE, read_file) != PATHNAME_LEN_SIZE) {
-            perror("Failed to read pathname length");
-            fclose(read_file);
-            exit(1);
-        }
-        uint16_t pathname_length = len_bytes[0] | (len_bytes[1] << MATCH_BYTE_BITS);
+        fread(len_bytes, 1, PATHNAME_LEN_SIZE, read_file);
+
+        uint16_t pathname_length = len_bytes[0] |
+            (len_bytes[1] << MATCH_BYTE_BITS);
         char *pathname = malloc(pathname_length + 1);
-        if (pathname == NULL) {
-            perror("malloc failed");
-            fclose(read_file);
-            exit(1);
-        }
+
+        // Read and validate pathname
         if (fread(pathname, 1, pathname_length, read_file) != pathname_length) {
             perror("Failed to read pathname");
             free(pathname);
@@ -639,58 +639,46 @@ void stage_4(char *in_pathname) {
         pathname[pathname_length] = '\0';
 
         uint8_t mode[MODE_SIZE];
-        if (fread(mode, 1, MODE_SIZE, read_file) != MODE_SIZE) {
-            perror("Failed to read mode");
-            free(pathname);
-            fclose(read_file);
-            exit(1);
-        }
+        fread(mode, 1, MODE_SIZE, read_file);
 
+        // Read file size from 4-byte little-endian value
         uint8_t size_bytes[FILE_SIZE_SIZE];
-        if (fread(size_bytes, 1, FILE_SIZE_SIZE, read_file) != FILE_SIZE_SIZE) {
-            perror("Failed to read file size");
-            free(pathname);
-            fclose(read_file);
-            exit(1);
-        }
+        fread(size_bytes, 1, FILE_SIZE_SIZE, read_file);
+
         uint32_t file_size = size_bytes[0] | (size_bytes[1] << MATCH_BYTE_BITS) |
-                           (size_bytes[2] << (MATCH_BYTE_BITS * 2)) |
-                           (size_bytes[3] << (MATCH_BYTE_BITS * 3));
+            (size_bytes[2] << (MATCH_BYTE_BITS * 2)) |
+            (size_bytes[3] << (MATCH_BYTE_BITS * 3));
 
         uint8_t updates_bytes[NUM_BLOCKS_SIZE];
-        if (fread(updates_bytes, 1, NUM_BLOCKS_SIZE, read_file) != NUM_BLOCKS_SIZE) {
-            perror("Failed to read number of updates");
-            free(pathname);
-            fclose(read_file);
-            exit(1);
-        }
-        uint32_t num_updates = updates_bytes[0] |
-                             (updates_bytes[1] << MATCH_BYTE_BITS) |
-                             (updates_bytes[2] << (MATCH_BYTE_BITS * 2));
+        fread(updates_bytes, 1, NUM_BLOCKS_SIZE, read_file);
 
+        // Read number of updates from 3-byte little-endian value
+        uint32_t num_updates = updates_bytes[0] |
+            (updates_bytes[1] << MATCH_BYTE_BITS) |
+            (updates_bytes[2] << (MATCH_BYTE_BITS * 2));
+
+        // Parse permissions from mode field
         mode_t permissions = parse_mode(mode);
         struct stat existing_stat;
         int file_exists = (stat(pathname, &existing_stat) == 0);
-        int needs_update = (num_updates > 0) || !file_exists || existing_stat.st_size != file_size;
+        int needs_update = (num_updates > 0) || !file_exists ||
+            existing_stat.st_size != file_size;
 
         FILE *out_file = NULL;
         if (needs_update) {
-            int fd = open(pathname, O_CREAT | O_WRONLY, 0666);
-            if (fd < 0) {
+            int file_descriptor =
+                open(pathname, O_CREAT | O_WRONLY, READ_WRITE_PERMISSIONS);
+            if (file_descriptor < 0) {
                 perror("Failed to create output file");
                 free(pathname);
                 fclose(read_file);
                 exit(1);
             }
-            if (ftruncate(fd, file_size) < 0) {
-                perror("Failed to resize output file");
-                close(fd);
-                free(pathname);
-                fclose(read_file);
-                exit(1);
-            }
-            close(fd);
-            out_file = fopen(pathname, "r+b");
+
+            ftruncate(file_descriptor, file_size);
+            close(file_descriptor);
+
+            out_file = fopen(pathname, "r + b");
             if (out_file == NULL) {
                 perror("Failed to open output file for writing");
                 free(pathname);
@@ -699,26 +687,18 @@ void stage_4(char *in_pathname) {
             }
         }
 
-        if (chmod(pathname, permissions) < 0) {
-            perror("Failed to set file permissions");
-            if (out_file) fclose(out_file);
-            free(pathname);
-            fclose(read_file);
-            exit(1);
-        }
+        // Apply file permissions
+        chmod(pathname, permissions);
 
+        // Apply updates to the file
         for (uint32_t k = 0; k < num_updates; k++) {
             uint8_t idx_bytes[BLOCK_INDEX_SIZE];
-            if (fread(idx_bytes, 1, BLOCK_INDEX_SIZE, read_file) != BLOCK_INDEX_SIZE) {
-                perror("Failed to read block index");
-                if (out_file) fclose(out_file);
-                free(pathname);
-                fclose(read_file);
-                exit(1);
-            }
-            uint32_t block_idx = idx_bytes[0] | (idx_bytes[1] << MATCH_BYTE_BITS) |
-                               (idx_bytes[2] << (MATCH_BYTE_BITS * 2));
+            fread(idx_bytes, 1, BLOCK_INDEX_SIZE, read_file);
 
+            uint32_t block_idx = idx_bytes[0] | (idx_bytes[1] << MATCH_BYTE_BITS) |
+                (idx_bytes[2] << (MATCH_BYTE_BITS * 2));
+
+            // Read 2-byte update length (little-endian)
             uint8_t update_len_bytes[UPDATE_LEN_SIZE];
             if (fread(update_len_bytes, 1, UPDATE_LEN_SIZE, read_file)
                 != UPDATE_LEN_SIZE) {
@@ -729,20 +709,25 @@ void stage_4(char *in_pathname) {
                 exit(1);
             }
             uint16_t update_length = update_len_bytes[0]
-                                  | (update_len_bytes[1] << MATCH_BYTE_BITS);
+                | (update_len_bytes[1] << MATCH_BYTE_BITS);
 
             uint8_t *update_data = malloc(update_length);
 
+            // Apply updates
             fread(update_data, 1, update_length, read_file);
             fseek(out_file, block_idx * BLOCK_SIZE, SEEK_SET);
             fwrite(update_data, 1, update_length, out_file);
             free(update_data);
         }
 
-        if (out_file) fclose(out_file);
+        // Close the output file if opened
+        if (out_file) {
+            fclose(out_file);
+        }
         free(pathname);
     }
 
+    // Check for extra data by attempting to read one more byte
     int extra_byte = fgetc(read_file);
     if (extra_byte != EOF) {
         perror("Extra data in TCBI file");
@@ -753,8 +738,12 @@ void stage_4(char *in_pathname) {
     fclose(read_file);
 }
 
+
+// Helper function to parse a 10-byte ls-like mode string into a mode_t value
+// Decided not to expand the ifs to keep function clean and compact
 mode_t parse_mode(uint8_t *mode) {
     mode_t m = 0;
+
     if (mode[0] == 'd') m |= S_IFDIR;
     if (mode[1] == 'r') m |= S_IRUSR;
     if (mode[2] == 'w') m |= S_IWUSR;
@@ -765,5 +754,5 @@ mode_t parse_mode(uint8_t *mode) {
     if (mode[7] == 'r') m |= S_IROTH;
     if (mode[8] == 'w') m |= S_IWOTH;
     if (mode[9] == 'x') m |= S_IXOTH;
-    return m & 0777;
+    return m & ALL_PERMISSIONS;
 }
